@@ -8,6 +8,8 @@
 #include <list>
 #include <string>
 #include <string.h>
+#include <stdio.h>
+#include <errno.h>
 
 namespace {
 	int trans_counter = 0;
@@ -75,6 +77,9 @@ namespace {
 }
 
 rvm_t rvm_init(const char *directory) {
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
+
 	/* Get the absolute pathname of the directory. */
 	char *abspath;
 	int found = 0;
@@ -101,15 +106,16 @@ rvm_t rvm_init(const char *directory) {
 
 	rvm_struct_t newrvm;
 	newrvm.pathname = path;
-	newrvm.redologfd = open((path+"/rvmlog").c_str(), O_RDWR, O_CREAT);
-	rvms.push_back(newrvm);
+	system(("touch "+path+"/rvmlog").c_str());
 
-	rvm_truncate_log(&newrvm);
 	rvms.push_back(newrvm);
 	return &(rvms.back());
 }
 
 void *rvm_map(rvm_t rvm, const char *segname, int size_to_create) {
+
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
 
 	int fd;
 	void * segbuf;
@@ -122,8 +128,9 @@ void *rvm_map(rvm_t rvm, const char *segname, int size_to_create) {
 	/* I presume here that size_to_create and the existing file size are
 	 * both lower bounds on the final size of the segment. */
 
+	system(("touch "+rvm->pathname+"/"+segname+".rvmseg").c_str());
 	fd = open((rvm->pathname+"/"+segname+".rvmseg").c_str(),
-			O_RDWR, O_CREAT);
+			O_RDWR);
 	if(-1 == fd)
 		return 0x0;
 
@@ -163,16 +170,20 @@ void *rvm_map(rvm_t rvm, const char *segname, int size_to_create) {
 	segment_t tempseg;
 	tempseg.segname = std::string(segname);
 	tempseg.size = size_to_create;
-	tempseg.segbase = segbuf;
+	tempseg.segbase = 0x0;
 	tempseg.busy = 0;
 
 	rvm->mapped_segs.push_back(tempseg);
+	rvm->mapped_segs.back().segbase = segbuf;
 
 	return segbuf;
 }
 
 void rvm_unmap(rvm_t rvm, void *segbase) {
 	
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
+
 	std::list<segment_t>::iterator segi = ispmapped(rvm, segbase);
 	if(segi == rvm->mapped_segs.end())
 		return;
@@ -195,13 +206,16 @@ void rvm_unmap(rvm_t rvm, void *segbase) {
 
 void rvm_destroy(rvm_t rvm, const char *segname) {
 
-	rvm_truncate_log(rvm); /* Ensures that the truncate log contains no
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
+
+	rvm_truncate_log(rvm); /* Ensures that the redo log contains no
 				  references to invalid segments. */
 	std::list<segment_t>::iterator segi = isnmapped(rvm, segname);
 	if(segi != rvm->mapped_segs.end())
 		rvm_unmap(rvm, segi->segbase);
 
-	system(("rm -rf "+rvm->pathname+"/"+segi->segname+".rvmseg").c_str());
+	system(("rm -rf "+rvm->pathname+"/"+segname+".rvmseg").c_str());
 }
 
 trans_t rvm_begin_trans(rvm_t rvm, int numsegs, void **segbases) {
@@ -209,6 +223,9 @@ trans_t rvm_begin_trans(rvm_t rvm, int numsegs, void **segbases) {
 	std::list<trans_range_t> temprangelist;
 	std::list<segment_t>::iterator ii;
 	int i;
+
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
 
 	/* Code to check if all segments are free, and abort if not. */
 	for(ii = rvm->mapped_segs.begin();
@@ -237,14 +254,6 @@ trans_t rvm_begin_trans(rvm_t rvm, int numsegs, void **segbases) {
 }
 
 void rvm_about_to_modify(trans_t tid, void *segbase, int offset, int size) {
-	/* This implicitly assumes that tid is valid for last_rvm. A correct
-	 * use of the library should in fact guarantee this outcome. This ugly,
-	 * ugly hack was necessitated because I thought that the library should
-	 * be able to have multiple rvm sessions active at once. If there
-	 * aren't --- if only one is ever active --- then correctness follows
-	 * for the case where the user assumes that there is in fact only one
-	 * static global rvm session active.
-	 */
 
 	std::list<trans_base_t>::iterator ii;
 	rvm_t last_rvm;
@@ -252,6 +261,9 @@ void rvm_about_to_modify(trans_t tid, void *segbase, int offset, int size) {
 	temprange.offset = offset;
 	temprange.size = size;
 	temprange.backup = 0x0;
+
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
 
 	if(trtorvm.count(tid) == 0)
 		return;
@@ -287,6 +299,9 @@ void rvm_abort_trans(trans_t tid) {
 	std::map<void *, std::list<trans_range_t> >::iterator mi;
 	std::list<segment_t>::iterator si;
 	
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
+
 	if(trtorvm.count(tid) == 0)
 		return;
 	last_rvm = trtorvm[tid];
@@ -328,7 +343,11 @@ void rvm_commit_trans(trans_t tid) {
 	std::list<trans_base_t>::iterator ti;
 	std::map<void *, std::list<trans_range_t> >::iterator mi;
 	std::list<segment_t>::iterator si;
+	int logfd;
 	
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
+
 	if(trtorvm.count(tid) == 0)
 		return;
 	last_rvm = trtorvm[tid];
@@ -344,31 +363,35 @@ void rvm_commit_trans(trans_t tid) {
 	if(last_rvm->transactions.end() == ti)
 		return;
 
-	lseek(last_rvm->redologfd, 0, SEEK_END);
+	logfd = open((last_rvm->pathname+"/rvmlog").c_str(), O_RDWR, O_APPEND);
+	if(-1 == logfd)
+		fprintf(stderr, "%s: %s (%d)\n",
+				__func__, strerror(errno), logfd);
+	lseek(logfd, 0, SEEK_END);
 	/* For every valid segment, write record to the log. */
 	for(mi = trp->mods.begin(); mi != trp->mods.end(); mi++) {
 		if(0 == trp->segbases.count(mi->first))
 			continue;
 		std::string currsegname(getsegname(last_rvm, mi->first));
 		int tempint = currsegname.length() + 1;
-		write(last_rvm->redologfd, &tempint, sizeof(int));
-		write(last_rvm->redologfd, currsegname.c_str(),
-				currsegname.length());
+		write(logfd, &tempint, sizeof(int));
+		write(logfd, currsegname.c_str(), tempint);
 		tempint = mi->second.size();
-		write(last_rvm->redologfd, &tempint, sizeof(int));
+		write(logfd, &tempint, sizeof(int));
 		std::list<trans_range_t>::iterator trit;
 		for(trit = mi->second.begin();trit != mi->second.end();trit++) {
-			write(last_rvm->redologfd, &(trit->offset),
+			write(logfd, &(trit->offset),
 					sizeof(int));
-			write(last_rvm->redologfd, &(trit->size),
+			write(logfd, &(trit->size),
 					sizeof(int));
-			write(last_rvm->redologfd,
+			write(logfd,
 					((char*)mi->first) + trit->offset,
 					trit->size);
 		}
 	}
 
-	fsync(last_rvm->redologfd);
+	fsync(logfd);
+	close(logfd);
 
 	/* Mark all valid segments non-busy. */
 	for(si = last_rvm->mapped_segs.begin();
@@ -382,15 +405,42 @@ void rvm_commit_trans(trans_t tid) {
 void rvm_truncate_log(rvm_t rvm) {
 
 	char *segname;
-	int offset, size, segnamelen, currsegranges, logfd = rvm->redologfd;
+	int offset, size, segnamelen, currsegranges, logfd;
 	int segfd;
 	int i;
 	void *data;
 	struct stat statbuf;
 
+	if(debug)
+		fprintf(stderr, "%s called.\n", __func__);
+
+	logfd = open((rvm->pathname+"/rvmlog").c_str(), O_RDONLY, O_CREAT);
+	if(-1 == logfd) {
+		fprintf(stderr, "%s: Failed to open log: %s\n",
+				__func__, strerror(errno));
+		return;
+	}
+
 	lseek(logfd, 0, SEEK_SET);
-	fstat(logfd, &statbuf);
+	if(-1 == fstat(logfd, &statbuf)) {
+		fprintf(stderr, "%s: %s (%d) \n", __func__, strerror(errno),
+				logfd);
+		return;
+	}
+
+	if(0 == statbuf.st_size) {
+		close(logfd);
+		if(debug)
+			fprintf(stderr,
+				"Returning from %s at %d: nothing in log\n",
+				__func__, __LINE__);
+		return;
+	}
+
 	while(lseek(logfd, 0, SEEK_CUR) < statbuf.st_size) {
+
+		//printf("%ld\n", lseek(logfd, 0, SEEK_CUR));
+		//printf("%s\n", strerror(errno));
 		read(logfd, &segnamelen, sizeof(int));
 		segname = (char *)malloc(segnamelen);
 		read(logfd, segname, segnamelen);
@@ -401,14 +451,18 @@ void rvm_truncate_log(rvm_t rvm) {
 			read(logfd, &offset, sizeof(int));
 			read(logfd, &size, sizeof(int));
 			data = malloc(size);
-			read(logfd, &data, size);
+			read(logfd, data, size);
 			lseek(segfd, offset, SEEK_SET);
-			write(segfd, &data, size);
+			write(segfd, data, size);
 			free(data);
 		}
+		fsync(segfd);
 		close(segfd);
 		free(segname);
 	}
+	close(logfd);
+	system(("rm -rf "+rvm->pathname+"/rvmlog").c_str());
+	system(("touch "+rvm->pathname+"/rvmlog").c_str());
 }
 
 segment::~segment() {
@@ -420,8 +474,3 @@ trans_range::~trans_range() {
 	if(backup)
 		free(backup);
 }
-
-rvm_struct::~rvm_struct() {
-	close(redologfd);
-}
-
